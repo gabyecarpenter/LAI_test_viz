@@ -1,11 +1,13 @@
 ---
-title: "LAI_test_viz"
+title: "LAI Test Visualization"
+about:
+  template: jolla
+  image: images/MIR-logo.png
+  image-shape: rectangle
+  links:
+    - icon: link-45deg / link
+      text: Mission Iconic Reefs
+      href: https://missioniconicreefs.org/
+    
 ---
 
-This is a Quarto website.
-
-To learn more about Quarto websites visit <https://quarto.org/docs/websites>.
-
-```{r}
-1 + 1
-```

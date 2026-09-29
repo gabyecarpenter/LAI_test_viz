@@ -1,0 +1,47 @@
+---
+title: "Data"
+format: 
+  html:
+    page-layout: full
+---
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+library(terra)
+library(leaflet)
+
+# 1. Load your two GeoTIFF files (Timepoint 1 and Timepoint 2)
+# Replace with actual file paths relative to your .qmd file
+tif_t1 <- rast("data/CFN_CA-1_2023-04-13_web.tif")
+tif_t2 <- rast("data/CFN_CA-1_2024-04-12_web.tif")
+
+# 2. Reproject to WGS84 for Leaflet
+tif_t1_wgs84 <- project(tif_t1, "EPSG:4326")
+tif_t2_wgs84 <- project(tif_t2, "EPSG:4326")
+
+# 3. Build Map using standard addRasterImage
+leaflet(width = "100%", height = "800px") %>%
+  addTiles(group = "OpenStreetMap") %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  
+  addRasterImage(
+    tif_t1_wgs84,
+    opacity = 0.8,
+    group = "Timepoint 1"
+  ) %>%
+  
+  addRasterImage(
+    tif_t2_wgs84,
+    opacity = 0.8,
+    group = "Timepoint 2"
+  ) %>%
+  
+  addLayersControl(
+    baseGroups = c("OpenStreetMap", "Satellite"),
+    overlayGroups = c("Timepoint 1", "Timepoint 2"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+```
