@@ -1,6 +1,9 @@
 project:
   type: website
   output-dir: docs
+  render:
+    - index.qmd
+    - Data.qmd
 
 website:
   title: "LAI Test Visualization"

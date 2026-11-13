@@ -9,39 +9,212 @@ format:
 #| echo: false
 #| message: false
 #| warning: false
-
-library(terra)
+#| 
+library(sf)
 library(leaflet)
+library(htmltools)
+library(dplyr)
 
-# 1. Load your two GeoTIFF files (Timepoint 1 and Timepoint 2)
-# Replace with actual file paths relative to your .qmd file
-tif_t1 <- rast("data/CFN_CA-1_2023-04-13_web.tif")
-tif_t2 <- rast("data/CFN_CA-1_2024-04-12_web.tif")
+# 1. Base Google Cloud Storage Bucket
+BUCKET_URL <- "https://storage.googleapis.com/ncrmp-atlantic-photos/MIR"
 
-# 2. Reproject to WGS84 for Leaflet
-tif_t1_wgs84 <- project(tif_t1, "EPSG:4326")
-tif_t2_wgs84 <- project(tif_t2, "EPSG:4326")
+# 2. Load Local Plot CSV (Add 'data/plot_locations.csv' to your .gitignore!)
+# Expected CSV columns: site, plot, year, lat, lon, filename
 
-# 3. Build Map using standard addRasterImage
-leaflet(width = "100%", height = "800px") %>%
-  addTiles(group = "OpenStreetMap") %>%
+plot_data <- read.csv("gitignore/data/plot_locations.csv", stringsAsFactors = FALSE)
+if (!"in_bucket" %in% names(plot_data)) {
+  plot_data$in_bucket <- TRUE
+}
+
+plot_data$marker_color <- ifelse(plot_data$in_bucket, "#10b981", "#9ca3af")
+
+# 3. Spatial points
+points_sf <- st_as_sf(plot_data, coords = c("lon", "lat"), crs = 4326)
+
+# Construct Popup HTML with an explicit JS trigger button
+popups_html <- sprintf(
+  "<b>Site: </b>%s<br>
+   <b>Plot: </b>%s<br>
+   <b>Year: </b>%s<br>
+   <b>Status: </b>%s<br><br>
+   <button onclick=\"loadGeoTiff('%s')\" style=\"background-color:#0284c7; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-weight:bold;\">
+     📥 Load Photo Below
+   </button>",
+  plot_data$site,
+  plot_data$plot,
+  plot_data$year,
+  ifelse(plot_data$in_bucket, "<span style='color:green;'>Available in GCS</span>", "<span style='color:gray;'>Not in Bucket</span>"),
+  plot_data$filename
+)
+
+# 4. Regional Overview Map
+main_map <- leaflet(elementId = "main_map", width = "100%", height = "550px") %>%
+  setView(lng = -81.00, lat = 24.70, zoom = 9) %>%
   addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addTiles(group = "OpenStreetMap") %>%
   
-  addRasterImage(
-    tif_t1_wgs84,
-    opacity = 0.8,
-    group = "Timepoint 1"
+  addCircleMarkers(
+    data = points_sf,
+    radius = 12,
+    color = "#ffffff",
+    fillColor = ~marker_color,
+    fillOpacity = 0.9,
+    weight = 2,
+    layerId = plot_data$filename,
+    popup = popups_html
   ) %>%
   
-  addRasterImage(
-    tif_t2_wgs84,
-    opacity = 0.8,
-    group = "Timepoint 2"
+  addLegend(
+    position = "bottomright",
+    colors = c("#10b981", "#9ca3af"),
+    labels = c("File in Bucket", "File Missing/Pending"),
+    title = "Bucket Status",
+    opacity = 0.9
   ) %>%
   
   addLayersControl(
-    baseGroups = c("OpenStreetMap", "Satellite"),
-    overlayGroups = c("Timepoint 1", "Timepoint 2"),
+    baseGroups = c("Satellite", "OpenStreetMap"),
     options = layersControlOptions(collapsed = FALSE)
   )
+
+# 5. Include geotiff.js
+geotiff_library <- tags$script(src = "[https://cdn.jsdelivr.net/npm/geotiff](https://cdn.jsdelivr.net/npm/geotiff)")
+
+# 6. Global JS Function invoked directly by button or marker
+js_script <- tags$script(HTML("
+  window.loadGeoTiff = function(filename) {
+    if (!filename) return;
+    
+    let bucketUrl = '[https://storage.googleapis.com/ncrmp-atlantic-photos/MIR/](https://storage.googleapis.com/ncrmp-atlantic-photos/MIR/)';
+    let fullImageUrl = bucketUrl + filename;
+    
+    let statusEl = document.getElementById('photo_status');
+    let progressContainer = document.getElementById('progress_container');
+    let progressBar = document.getElementById('progress_bar');
+    let progressText = document.getElementById('progress_text');
+    let canvas = document.getElementById('tiff_canvas');
+    let ctx = canvas.getContext('2d');
+    
+    // Reveal Progress Bar UI immediately
+    progressContainer.style.display = 'block';
+    progressBar.style.width = '0%';
+    progressText.innerText = '0%';
+    statusEl.innerHTML = '⚡ Fetching GeoTIFF: <b>' + filename + '</b>...';
+    
+    // Clear previous drawing
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Stream array buffer via XHR
+    let xhr = new XMLHttpRequest();
+    xhr.open('GET', fullImageUrl, true);
+    xhr.responseType = 'arraybuffer';
+    
+    xhr.onprogress = function(event) {
+      if (event.lengthComputable) {
+        let percentComplete = Math.round((event.loaded / event.total) * 100);
+        progressBar.style.width = percentComplete + '%';
+        progressText.innerText = percentComplete + '%';
+        
+        if (percentComplete === 100) {
+          statusEl.innerHTML = '⚙️ Processing pixel arrays for <b>' + filename + '</b>...';
+        }
+      } else {
+        statusEl.innerHTML = '⚡ Downloading GeoTIFF...';
+      }
+    };
+    
+    xhr.onload = async function() {
+      if (xhr.status === 200) {
+        try {
+          let arrayBuffer = xhr.response;
+          const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
+          const image = await tiff.getImage();
+          const width = image.getWidth();
+          const height = image.getHeight();
+          
+          const rasters = await image.readRasters();
+          
+          canvas.width = width;
+          canvas.height = height;
+          
+          const imgData = ctx.createImageData(width, height);
+          const data = imgData.data;
+          
+          for (let i = 0; i < rasters[0].length; i++) {
+            let val = rasters[0][i];
+            let idx = i * 4;
+            data[idx]     = rasters[0][i];
+            data[idx + 1] = rasters[1] ? rasters[1][i] : val;
+            data[idx + 2] = rasters[2] ? rasters[2][i] : val;
+            data[idx + 3] = 255;
+          }
+          
+          ctx.putImageData(imgData, 0, 0);
+          statusEl.innerHTML = '✅ Active Photo: <b>' + filename + '</b>';
+          
+          setTimeout(() => { progressContainer.style.display = 'none'; }, 1000);
+          
+        } catch (err) {
+          console.error(err);
+          statusEl.innerHTML = '<span style=\"color:red;\">Error parsing TIFF pixel buffer.</span>';
+        }
+      } else {
+        statusEl.innerHTML = '<span style=\"color:red;\">HTTP Error ' + xhr.status + ': File missing or CORS restricted on GCS.</span>';
+      }
+    };
+    
+    xhr.onerror = function() {
+      statusEl.innerHTML = '<span style=\"color:red;\">Network error or CORS restriction on Google Cloud Storage.</span>';
+    };
+    
+    xhr.send();
+  };
+  
+  // Also catch direct marker clicks if popup is closed
+  document.addEventListener('DOMContentLoaded', function() {
+    let checkMap = setInterval(function() {
+      let mainMapWidget = HTMLWidgets.find('#main_map');
+      if (!mainMapWidget) return;
+      clearInterval(checkMap);
+      let map = mainMapWidget.getMap();
+      map.on('layerclick', function(e) {
+        if (e.layer && e.layer.options && e.layer.options.layerId) {
+          window.loadGeoTiff(e.layer.options.layerId);
+        }
+      });
+    }, 400);
+  });
+"))
+
+# 7. Render Page Layout
+div(
+  geotiff_library,
+  tags$h3("1. Regional Overview Map"),
+  tags$p(tags$small("Click any green marker, then click 'Load Photo Below' inside the popup.")),
+  main_map,
+  tags$hr(),
+  tags$h3("2. Site Photo Preview"),
+  
+  # Status Text & Progress Bar
+  tags$p(id = "photo_status", style = "font-weight: bold; color: #0284c7;", "Select a marker above to display the photo."),
+  div(
+    id = "progress_container",
+    style = "display: none; margin-bottom: 15px;",
+    div(
+      style = "display: flex; align-items: center; gap: 10px;",
+      div(
+        style = "flex-grow: 1; background-color: #e2e8f0; border-radius: 9999px; height: 14px; overflow: hidden; border: 1px solid #cbd5e1;",
+        div(id = "progress_bar", style = "width: 0%; height: 100%; background-color: #0284c7; transition: width 0.15s ease;")
+      ),
+      span(id = "progress_text", style = "font-size: 0.9em; font-weight: bold; color: #0284c7; min-width: 40px;", "0%")
+    )
+  ),
+  
+  # Canvas Area
+  div(
+    style = "min-height: 200px; padding: 10px; background: #f8fafc; border-radius: 8px; text-align: center; overflow-x: auto;",
+    tags$canvas(id = "tiff_canvas", style = "max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px;")
+  ),
+  js_script
+)
 ```
