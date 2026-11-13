@@ -1,23 +1,9 @@
 [
   {
-    "objectID": "index.html",
-    "href": "index.html",
-    "title": "LAI_test_viz",
-    "section": "",
-    "text": "This is a Quarto website.\nTo learn more about Quarto websites visit https://quarto.org/docs/websites.\n\n1 + 1\n\n[1] 2"
-  },
-  {
-    "objectID": "about.html",
-    "href": "about.html",
-    "title": "About",
-    "section": "",
-    "text": "About this site\n\n1 + 1\n\n[1] 2"
-  },
-  {
     "objectID": "Data.html",
     "href": "Data.html",
     "title": "Data",
     "section": "",
-    "text": "library(leaflet)\nlibrary(htmltools)\n\n# 1. Define your single center point (Latitude & Longitude)\ncenter_lat &lt;- 25.22073\ncenter_lng &lt;- -80.21036\n\n# 2. Set box size (offset in degrees)\n# ~0.001 degrees is roughly 100 meters across\nbox_size &lt;- 0.0001  \n\n# Compute opposite corners from the single point\nlat1 &lt;- center_lat + box_size\nlng1 &lt;- center_lng - box_size\nlat2 &lt;- center_lat - box_size\nlng2 &lt;- center_lng + box_size\n\n# 3. Image and Title Setup\nimage_path &lt;- \"images/CFN_CE-4_2024-07-09.tif\"\nplot_title &lt;- \"Center Plot Location\"\n\npopup_html &lt;- sprintf(\n  \"&lt;div style='text-align: center;'&gt;\n     &lt;h4 style='margin: 0 0 8px 0;'&gt;%s&lt;/h4&gt;\n     &lt;img src='%s' width='250px' style='border-radius: 6px;'/&gt;\n   &lt;/div&gt;\",\n  plot_title,\n  image_path\n)\n\n# 4. Render Map centered on your point\nleaflet() %&gt;%\n  addTiles() %&gt;%\n  setView(lng = center_lng, lat = center_lat, zoom = 17) %&gt;%\n  addRectangles(\n    lng1 = lng1, lat1 = lat1,\n    lng2 = lng2, lat2 = lat2,\n    fillColor = \"#357abd\",\n    fillOpacity = 0.4,\n    color = \"#1d4ed8\",\n    weight = 2,\n    highlightOptions = highlightOptions(\n      weight = 4,\n      color = \"#f59e0b\",\n      fillOpacity = 0.7,\n      bringToFront = TRUE\n    ),\n    popup = popup_html\n  )"
+    "text": "1. Regional Overview Map\n\nClick any green marker, then click 'Load Photo Below' inside the popup.\n\n\n\n\n2. Site Photo Preview\nSelect a marker above to display the photo.\n\n\n\n\n\n0%"
   }
 ]
