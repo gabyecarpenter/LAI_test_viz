@@ -1,6 +1,6 @@
 ---
 title: "Data"
-format: 
+format:
   html:
     page-layout: full
 ---
@@ -9,212 +9,774 @@ format:
 #| echo: false
 #| message: false
 #| warning: false
-#| 
-library(sf)
+
 library(leaflet)
+library(htmlwidgets)
 library(htmltools)
-library(dplyr)
 
-# 1. Base Google Cloud Storage Bucket
 BUCKET_URL <- "https://storage.googleapis.com/ncrmp-atlantic-photos/MIR"
+TIFF_SIZES <- c(6000, 12000, 18000)
+DEFAULT_TIFF_SIZE <- 6000
+PLOT_ZOOM_LEVEL <- 11
 
-# 2. Load Local Plot CSV (Add 'data/plot_locations.csv' to your .gitignore!)
-# Expected CSV columns: site, plot, year, lat, lon, filename
-
-plot_data <- read.csv("gitignore/data/plot_locations.csv", stringsAsFactors = FALSE)
-if (!"in_bucket" %in% names(plot_data)) {
-  plot_data$in_bucket <- TRUE
-}
-
-plot_data$marker_color <- ifelse(plot_data$in_bucket, "#10b981", "#9ca3af")
-
-# 3. Spatial points
-points_sf <- st_as_sf(plot_data, coords = c("lon", "lat"), crs = 4326)
-
-# Construct Popup HTML with an explicit JS trigger button
-popups_html <- sprintf(
-  "<b>Site: </b>%s<br>
-   <b>Plot: </b>%s<br>
-   <b>Year: </b>%s<br>
-   <b>Status: </b>%s<br><br>
-   <button onclick=\"loadGeoTiff('%s')\" style=\"background-color:#0284c7; color:white; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-weight:bold;\">
-     📥 Load Photo Below
-   </button>",
-  plot_data$site,
-  plot_data$plot,
-  plot_data$year,
-  ifelse(plot_data$in_bucket, "<span style='color:green;'>Available in GCS</span>", "<span style='color:gray;'>Not in Bucket</span>"),
-  plot_data$filename
+mir_habitat_colors <- c(
+  "Backreef"                 = "#E85B55",
+  "Deep Boulder Coral"       = "#002D54",
+  "Deep Reef"                = "#245899",
+  "Dense Palmata Framework"  = "#0087A4",
+  "Forereef Terrace"         = "#49C5B6",
+  "Patch Reef"               = "#F48CC5",
+  "Reef Crest"               = "#FAA53D",
+  "Shallow Boulder Coral"    = "#BF0D3E",
+  "Shallow Reef Crest"       = "#E83258",
+  "Spur and Groove - Sides"  = "#A4CD39",
+  "Spur and Groove - Top"    = "#48BC46"
 )
 
-# 4. Regional Overview Map
-main_map <- leaflet(elementId = "main_map", width = "100%", height = "550px") %>%
-  setView(lng = -81.00, lat = 24.70, zoom = 9) %>%
-  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
-  addTiles(group = "OpenStreetMap") %>%
-  
-  addCircleMarkers(
-    data = points_sf,
-    radius = 12,
-    color = "#ffffff",
-    fillColor = ~marker_color,
-    fillOpacity = 0.9,
-    weight = 2,
-    layerId = plot_data$filename,
-    popup = popups_html
-  ) %>%
-  
+reefs <- read.csv(
+  "gitignore/data/reefs.csv",
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA", "N/A")
+)
+plots <- read.csv(
+  "gitignore/data/plots.csv",
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA", "N/A")
+)
+maps <- read.csv(
+  "gitignore/data/maps.csv",
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA", "N/A")
+)
+
+check_columns <- function(data, required, filename) {
+  missing <- setdiff(required, names(data))
+  if (length(missing)) {
+    stop(filename, " is missing columns: ", paste(missing, collapse = ", "))
+  }
+}
+
+check_columns(reefs, c("reef_name", "reef_abb", "lat", "lon"), "reefs.csv")
+check_columns(plots, c("reef_name", "plot_id", "lat", "lon", "habitat"), "plots.csv")
+check_columns(
+  maps,
+  c("map_id", "plot_id", "date", "timepoint", "available"),
+  "maps.csv"
+)
+
+# Ignore blank trailing rows; habitat may be missing.
+plots <- plots[
+  complete.cases(plots[c("reef_name", "plot_id", "lat", "lon")]),
+  ,
+  drop = FALSE
+]
+
+if (!nrow(reefs)) stop("reefs.csv must contain at least one reef.")
+if (!nrow(plots)) stop("plots.csv must contain at least one plot.")
+
+reefs$lat <- suppressWarnings(as.numeric(reefs$lat))
+reefs$lon <- suppressWarnings(as.numeric(reefs$lon))
+plots$lat <- suppressWarnings(as.numeric(plots$lat))
+plots$lon <- suppressWarnings(as.numeric(plots$lon))
+
+if (any(!is.finite(reefs$lat)) || any(!is.finite(reefs$lon))) {
+  stop("Every reef in reefs.csv must have numeric lat and lon coordinates.")
+}
+if (any(!is.finite(plots$lat)) || any(!is.finite(plots$lon))) {
+  stop("Every plot in plots.csv must have numeric lat and lon coordinates.")
+}
+if (anyDuplicated(reefs$reef_name)) {
+  stop("reef_name values must be unique in reefs.csv.")
+}
+if (any(!plots$reef_name %in% reefs$reef_name)) {
+  stop("Every plots.csv reef_name must match a reef_name in reefs.csv.")
+}
+
+# Repeated plot rows are allowed only when their details agree.
+plot_fields <- c("reef_name", "lat", "lon", "habitat")
+plot_groups <- split(plots, plots$plot_id)
+conflicting_plot_ids <- names(Filter(
+  function(group) nrow(unique(group[, plot_fields, drop = FALSE])) > 1,
+  plot_groups
+))
+
+if (length(conflicting_plot_ids)) {
+  stop(
+    "These plot_id values have conflicting reef, coordinates, or habitat in plots.csv: ",
+    paste(conflicting_plot_ids, collapse = ", "),
+    ". Keep one consistent row per plot_id."
+  )
+}
+
+# Keep one row per plot so each plot has one marker.
+plots <- plots[!duplicated(plots$plot_id), , drop = FALSE]
+
+if (any(!maps$plot_id %in% plots$plot_id)) {
+  stop("Every maps.csv plot_id must match a plot_id in plots.csv.")
+}
+
+maps$available <- toupper(trimws(as.character(maps$available)))
+if (anyNA(maps$available) || any(!maps$available %in% c("Y", "N"))) {
+  stop("maps.csv available values must be Y or N.")
+}
+
+plot_data <- lapply(seq_len(nrow(plots)), function(i) {
+  plot <- plots[i, ]
+  plot_maps <- maps[maps$plot_id == plot$plot_id, , drop = FALSE]
+
+  map_items <- lapply(seq_len(nrow(plot_maps)), function(j) {
+    item <- plot_maps[j, ]
+    list(
+      map_id = as.character(item$map_id),
+      date = as.character(item$date),
+      timepoint = as.character(item$timepoint),
+      available = item$available == "Y"
+    )
+  })
+
+  list(
+    id = as.character(plot$plot_id),
+    name = as.character(plot$plot_id),
+    reef_name = as.character(plot$reef_name),
+    habitat = if (is.na(plot$habitat)) "" else as.character(plot$habitat),
+    lat = plot$lat,
+    lon = plot$lon,
+    maps = map_items
+  )
+})
+
+reef_data <- lapply(seq_len(nrow(reefs)), function(i) {
+  reef <- reefs[i, ]
+
+  reef_plots <- plot_data[vapply(
+    plot_data,
+    function(plot) identical(plot$reef_name, as.character(reef$reef_name)),
+    logical(1)
+  )]
+
+  list(
+    id = as.character(reef$reef_abb),
+    name = as.character(reef$reef_name),
+    lat = reef$lat,
+    lon = reef$lon,
+    plots = reef_plots
+  )
+})
+
+main_map <- leaflet(width = "100%", height = "550px") %>%
+  addProviderTiles(providers$Esri.WorldImagery) %>%
   addLegend(
     position = "bottomright",
-    colors = c("#10b981", "#9ca3af"),
-    labels = c("File in Bucket", "File Missing/Pending"),
-    title = "Bucket Status",
-    opacity = 0.9
+    colors = c(unname(mir_habitat_colors), "#9ca3af"),
+    labels = c(names(mir_habitat_colors), "Unknown / N/A"),
+    title = "Plot habitat",
+    opacity = 1
   ) %>%
-  
-  addLayersControl(
-    baseGroups = c("Satellite", "OpenStreetMap"),
-    options = layersControlOptions(collapsed = FALSE)
-  )
+  fitBounds(
+    lng1 = min(reefs$lon),
+    lat1 = min(reefs$lat),
+    lng2 = max(reefs$lon),
+    lat2 = max(reefs$lat)
+  ) %>%
+  htmlwidgets::onRender(
+    r"(
+    function(el, x, data) {
+      const map = this;
+      const reefs = [].concat(data.reefs || []);
+      const plotLayer = L.layerGroup();
+      const selectedPlot = document.getElementById('selected-plot');
+      const selectedHabitat = document.getElementById('selected-habitat');
+      const timepoints = document.getElementById('timepoints');
+      const status = document.getElementById('photo-status');
+      const canvas = document.getElementById('tiff-canvas');
+      const testerToggle = document.getElementById('size-tester');
+      const backButton = document.getElementById('back-to-reefs');
 
-# 5. Include geotiff.js
-geotiff_library <- tags$script(src = "[https://cdn.jsdelivr.net/npm/geotiff](https://cdn.jsdelivr.net/npm/geotiff)")
+      let activePlot = null;
 
-# 6. Global JS Function invoked directly by button or marker
-js_script <- tags$script(HTML("
-  window.loadGeoTiff = function(filename) {
-    if (!filename) return;
-    
-    let bucketUrl = '[https://storage.googleapis.com/ncrmp-atlantic-photos/MIR/](https://storage.googleapis.com/ncrmp-atlantic-photos/MIR/)';
-    let fullImageUrl = bucketUrl + filename;
-    
-    let statusEl = document.getElementById('photo_status');
-    let progressContainer = document.getElementById('progress_container');
-    let progressBar = document.getElementById('progress_bar');
-    let progressText = document.getElementById('progress_text');
-    let canvas = document.getElementById('tiff_canvas');
-    let ctx = canvas.getContext('2d');
-    
-    // Reveal Progress Bar UI immediately
-    progressContainer.style.display = 'block';
-    progressBar.style.width = '0%';
-    progressText.innerText = '0%';
-    statusEl.innerHTML = '⚡ Fetching GeoTIFF: <b>' + filename + '</b>...';
-    
-    // Clear previous drawing
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Stream array buffer via XHR
-    let xhr = new XMLHttpRequest();
-    xhr.open('GET', fullImageUrl, true);
-    xhr.responseType = 'arraybuffer';
-    
-    xhr.onprogress = function(event) {
-      if (event.lengthComputable) {
-        let percentComplete = Math.round((event.loaded / event.total) * 100);
-        progressBar.style.width = percentComplete + '%';
-        progressText.innerText = percentComplete + '%';
-        
-        if (percentComplete === 100) {
-          statusEl.innerHTML = '⚙️ Processing pixel arrays for <b>' + filename + '</b>...';
-        }
-      } else {
-        statusEl.innerHTML = '⚡ Downloading GeoTIFF...';
+      function clearDisplay() {
+        canvas.hidden = true;
+        canvas.width = 0;
+        canvas.height = 0;
+        status.textContent = '';
       }
-    };
-    
-    xhr.onload = async function() {
-      if (xhr.status === 200) {
+
+      function updatePlotVisibility() {
+        if (map.getZoom() >= data.plotZoomLevel) {
+          if (!map.hasLayer(plotLayer)) plotLayer.addTo(map);
+        } else if (map.hasLayer(plotLayer)) {
+          map.removeLayer(plotLayer);
+        }
+      }
+
+      function bucketUrl(filename) {
+        const encoded = filename.split('/').map(encodeURIComponent).join('/');
+        return data.bucket.replace(/\/$/, '') + '/' + encoded;
+      }
+
+      async function loadTiff(item, size) {
+        clearDisplay();
+
+        if (!window.GeoTIFF) {
+          status.textContent =
+            'GeoTIFF.js did not load. Check the script URL and network access.';
+          return;
+        }
+
+        const filename = item.map_id + '_' + size + '.tif';
+        const url = bucketUrl(filename);
+        const startedAt = performance.now();
+        status.textContent = 'Loading ' + filename + '…';
+
         try {
-          let arrayBuffer = xhr.response;
-          const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
+          const tiff = await GeoTIFF.fromUrl(url);
           const image = await tiff.getImage();
-          const width = image.getWidth();
-          const height = image.getHeight();
-          
-          const rasters = await image.readRasters();
-          
+          const sourceWidth = image.getWidth();
+          const sourceHeight = image.getHeight();
+          const scale = Math.min(1, 1600 / sourceWidth);
+          const width = Math.max(1, Math.round(sourceWidth * scale));
+          const height = Math.max(1, Math.round(sourceHeight * scale));
+          const samples = image.getSamplesPerPixel() >= 3 ? [0, 1, 2] : [0];
+
+          const pixels = await image.readRasters({
+            samples: samples,
+            interleave: true,
+            width: width,
+            height: height
+          });
+
           canvas.width = width;
           canvas.height = height;
-          
-          const imgData = ctx.createImageData(width, height);
-          const data = imgData.data;
-          
-          for (let i = 0; i < rasters[0].length; i++) {
-            let val = rasters[0][i];
-            let idx = i * 4;
-            data[idx]     = rasters[0][i];
-            data[idx + 1] = rasters[1] ? rasters[1][i] : val;
-            data[idx + 2] = rasters[2] ? rasters[2][i] : val;
-            data[idx + 3] = 255;
+
+          const context = canvas.getContext('2d');
+          const imageData = context.createImageData(width, height);
+
+          for (let i = 0; i < width * height; i++) {
+            const source = i * samples.length;
+            const target = i * 4;
+
+            imageData.data[target] = pixels[source];
+            imageData.data[target + 1] =
+              samples.length >= 3 ? pixels[source + 1] : pixels[source];
+            imageData.data[target + 2] =
+              samples.length >= 3 ? pixels[source + 2] : pixels[source];
+            imageData.data[target + 3] = 255;
           }
-          
-          ctx.putImageData(imgData, 0, 0);
-          statusEl.innerHTML = '✅ Active Photo: <b>' + filename + '</b>';
-          
-          setTimeout(() => { progressContainer.style.display = 'none'; }, 1000);
-          
-        } catch (err) {
-          console.error(err);
-          statusEl.innerHTML = '<span style=\"color:red;\">Error parsing TIFF pixel buffer.</span>';
+
+          context.putImageData(imageData, 0, 0);
+          canvas.hidden = false;
+
+          const elapsed = ((performance.now() - startedAt) / 1000).toFixed(2);
+          status.textContent =
+            filename + ' loaded and displayed in ' + elapsed + ' seconds.';
+        } catch (error) {
+          console.error('TIFF request failed:', url, error);
+          status.textContent =
+            'Could not load TIFF. Check the filename, bucket access, CORS settings, and TIFF format.';
         }
-      } else {
-        statusEl.innerHTML = '<span style=\"color:red;\">HTTP Error ' + xhr.status + ': File missing or CORS restricted on GCS.</span>';
       }
-    };
-    
-    xhr.onerror = function() {
-      statusEl.innerHTML = '<span style=\"color:red;\">Network error or CORS restriction on Google Cloud Storage.</span>';
-    };
-    
-    xhr.send();
-  };
-  
-  // Also catch direct marker clicks if popup is closed
-  document.addEventListener('DOMContentLoaded', function() {
-    let checkMap = setInterval(function() {
-      let mainMapWidget = HTMLWidgets.find('#main_map');
-      if (!mainMapWidget) return;
-      clearInterval(checkMap);
-      let map = mainMapWidget.getMap();
-      map.on('layerclick', function(e) {
-        if (e.layer && e.layer.options && e.layer.options.layerId) {
-          window.loadGeoTiff(e.layer.options.layerId);
+
+      function renderTimepoints(plot) {
+        activePlot = plot;
+        clearDisplay();
+        timepoints.replaceChildren();
+
+        const maps = [].concat(plot.maps || []);
+
+        if (!maps.length) {
+          timepoints.textContent = 'No timepoints are listed for this plot.';
+          return;
+        }
+
+        maps.forEach(function(item) {
+          const row = document.createElement('div');
+          row.className = 'timepoint-row';
+
+          const description = document.createElement('span');
+          description.textContent =
+            'Date: ' + (item.date || 'N/A') +
+            ' — Timepoint: ' + (item.timepoint || 'N/A');
+          row.appendChild(description);
+
+          if (!item.available) {
+            const unavailable = document.createElement('span');
+            unavailable.textContent = ' — N/A (not in bucket)';
+            row.appendChild(unavailable);
+          } else if (testerToggle.checked) {
+            const sizeSelect = document.createElement('select');
+
+            data.sizes.forEach(function(size) {
+              const option = document.createElement('option');
+              option.value = size;
+              option.textContent = size + ' pixels';
+              sizeSelect.appendChild(option);
+            });
+
+            const testButton = document.createElement('button');
+            testButton.type = 'button';
+            testButton.textContent = 'Test TIFF';
+            testButton.addEventListener('click', function() {
+              loadTiff(item, sizeSelect.value);
+            });
+
+            row.appendChild(sizeSelect);
+            row.appendChild(testButton);
+          } else {
+            const loadButton = document.createElement('button');
+            loadButton.type = 'button';
+            loadButton.textContent =
+              'Load TIFF (' + data.defaultSize + ' pixels)';
+            loadButton.addEventListener('click', function() {
+              loadTiff(item, data.defaultSize);
+            });
+            row.appendChild(loadButton);
+          }
+
+          timepoints.appendChild(row);
+        });
+      }
+
+      function selectPlot(plot) {
+        selectedPlot.textContent = plot.name;
+        selectedHabitat.textContent = 'Habitat: ' + (plot.habitat || 'N/A');
+        renderTimepoints(plot);
+      }
+
+      function showReefPlots(reef) {
+        const plots = [].concat(reef.plots || []);
+
+        clearDisplay();
+        activePlot = null;
+        selectedPlot.textContent = reef.name;
+        selectedHabitat.textContent = '';
+        timepoints.textContent =
+          'Zoom in to see plot markers, then select a plot.';
+
+        if (plots.length === 1) {
+          map.setView([Number(plots[0].lat), Number(plots[0].lon)], 13);
+        } else if (plots.length > 1) {
+          map.fitBounds(
+            L.latLngBounds(plots.map(function(plot) {
+              return [Number(plot.lat), Number(plot.lon)];
+            })).pad(0.25),
+            { maxZoom: 13 }
+          );
+        } else {
+          map.setView([Number(reef.lat), Number(reef.lon)], 12);
+          timepoints.textContent = 'No plots are listed for this reef.';
+        }
+
+        backButton.hidden = false;
+      }
+
+      reefs.forEach(function(reef) {
+        L.circleMarker([Number(reef.lat), Number(reef.lon)], {
+          radius: 12,
+          color: '#ffffff',
+          weight: 2,
+          fillColor: '#06b6d4',
+          fillOpacity: 0.95
+        })
+          .bindTooltip(reef.name)
+          .on('click', function() {
+            showReefPlots(reef);
+          })
+          .addTo(map);
+
+        [].concat(reef.plots || []).forEach(function(plot) {
+          const color = data.habitatColors[plot.habitat] || '#9ca3af';
+          const icon = L.divIcon({
+            className: '',
+            html:
+              '<div style="width:12px;height:12px;background-color:' +
+              color +
+              ';border:1px solid white;box-sizing:border-box"></div>',
+            iconSize: [14, 14],
+            iconAnchor: [7, 7]
+          });
+
+          L.marker([Number(plot.lat), Number(plot.lon)], { icon: icon })
+            .bindTooltip(plot.name + ' — ' + (plot.habitat || 'N/A'))
+            .on('click', function() {
+              selectPlot(plot);
+            })
+            .addTo(plotLayer);
+        });
+      });
+
+      map.on('zoomend', updatePlotVisibility);
+      updatePlotVisibility();
+
+      if (reefs.length) {
+        map.fitBounds(
+          L.latLngBounds(reefs.map(function(reef) {
+            return [Number(reef.lat), Number(reef.lon)];
+          })),
+          { maxZoom: 9 }
+        );
+      }
+
+      testerToggle.addEventListener('change', function() {
+        if (activePlot) renderTimepoints(activePlot);
+      });
+
+      backButton.addEventListener('click', function() {
+        clearDisplay();
+        activePlot = null;
+        selectedPlot.textContent = '';
+        selectedHabitat.textContent = '';
+        timepoints.textContent =
+          'Click a reef marker, then zoom in to see its plots.';
+        backButton.hidden = true;
+
+        if (reefs.length) {
+          map.fitBounds(
+            L.latLngBounds(reefs.map(function(reef) {
+              return [Number(reef.lat), Number(reef.lon)];
+            })),
+            { maxZoom: 9 }
+          );
         }
       });
-    }, 400);
-  });
-"))
+    }
+    )",
+    data = list(
+      reefs = reef_data,
+      bucket = BUCKET_URL,
+      sizes = as.character(TIFF_SIZES),
+      defaultSize = DEFAULT_TIFF_SIZE,
+      plotZoomLevel = PLOT_ZOOM_LEVEL,
+      habitatColors = as.list(mir_habitat_colors)
+    )
+  )
 
-# 7. Render Page Layout
-div(
-  geotiff_library,
+tagList(
+  tags$script(
+    src = "https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"
+  ),
   tags$h3("1. Regional Overview Map"),
-  tags$p(tags$small("Click any green marker, then click 'Load Photo Below' inside the popup.")),
+  tags$p("Click a reef marker or zoom in to see plot markers."),
   main_map,
   tags$hr(),
-  tags$h3("2. Site Photo Preview"),
-  
-  # Status Text & Progress Bar
-  tags$p(id = "photo_status", style = "font-weight: bold; color: #0284c7;", "Select a marker above to display the photo."),
-  div(
-    id = "progress_container",
-    style = "display: none; margin-bottom: 15px;",
-    div(
-      style = "display: flex; align-items: center; gap: 10px;",
-      div(
-        style = "flex-grow: 1; background-color: #e2e8f0; border-radius: 9999px; height: 14px; overflow: hidden; border: 1px solid #cbd5e1;",
-        div(id = "progress_bar", style = "width: 0%; height: 100%; background-color: #0284c7; transition: width 0.15s ease;")
-      ),
-      span(id = "progress_text", style = "font-size: 0.9em; font-weight: bold; color: #0284c7; min-width: 40px;", "0%")
-    )
+  tags$h3("2. Plot TIFFs"),
+  tags$button(
+    id = "back-to-reefs",
+    type = "button",
+    hidden = NA,
+    "Back to reefs"
   ),
-  
-  # Canvas Area
-  div(
-    style = "min-height: 200px; padding: 10px; background: #f8fafc; border-radius: 8px; text-align: center; overflow-x: auto;",
-    tags$canvas(id = "tiff_canvas", style = "max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px;")
+  tags$p(
+    tags$input(id = "size-tester", type = "checkbox"),
+    tags$label(`for` = "size-tester", " Enable size tester")
   ),
-  js_script
+  tags$p("When off, the 6,000-pixel TIFF loads. When on, choose a size to test."),
+  tags$h4(id = "selected-plot"),
+  tags$p(id = "selected-habitat"),
+  tags$div(
+    id = "timepoints",
+    "Click a reef marker or zoom in to see its plots."
+  ),
+  tags$p(id = "photo-status", role = "status"),
+  tags$canvas(
+    id = "tiff-canvas",
+    hidden = NA,
+    style = "max-width: 100%; height: auto;"
+  )
+)
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+BENTHIC_FILE <- "gitignore/data/vpi_data_community_cover.csv"
+
+benthic <- read.csv(
+  BENTHIC_FILE,
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA", "N/A"),
+  check.names = FALSE
+)
+
+required <- c(
+  "site", "plot", "year", "index", "survey_type",
+  "habitat_type", "group", "count", "n_points"
+)
+missing <- setdiff(required, names(benthic))
+if (length(missing)) {
+  stop("Benthic CSV is missing columns: ", paste(missing, collapse = ", "))
+}
+
+# Combine the site abbreviation and plot label to match plot IDs elsewhere.
+benthic$site <- trimws(as.character(benthic$site))
+benthic$plot <- trimws(as.character(benthic$plot))
+benthic$plot_id <- paste(benthic$site, benthic$plot, sep = "_")
+
+# Give the source columns descriptive names for the charts.
+benthic$map_id <- trimws(as.character(benthic$index))
+benthic$timepoint <- trimws(as.character(benthic$survey_type))
+
+for (column in c("year", "habitat_type", "group")) {
+  benthic[[column]] <- trimws(as.character(benthic[[column]]))
+}
+
+benthic$count <- suppressWarnings(as.numeric(benthic$count))
+benthic$n_points <- suppressWarnings(as.numeric(benthic$n_points))
+
+# Remove blank rows and records that cannot contribute to cover estimates.
+benthic <- benthic[
+  complete.cases(benthic[c(
+    "site", "plot_id", "year", "map_id", "timepoint",
+    "habitat_type", "group", "count", "n_points"
+  )]) &
+    is.finite(benthic$count) &
+    is.finite(benthic$n_points) &
+    benthic$n_points > 0,
+  ,
+  drop = FALSE
+]
+
+if (!nrow(benthic)) {
+  stop("The benthic CSV has no complete rows with positive n_points.")
+}
+
+# Summarize each plot map by benthic group.
+plot_summary <- aggregate(
+  cbind(count, n_points) ~
+    site + plot_id + year + map_id + timepoint + habitat_type + group,
+  data = benthic,
+  FUN = sum
+)
+plot_summary$percent <- 100 * plot_summary$count / plot_summary$n_points
+plot_summary$x_label <- paste(
+  plot_summary$year,
+  plot_summary$map_id,
+  plot_summary$timepoint,
+  plot_summary$habitat_type,
+  sep = " / "
+)
+
+# Pool counts and sample sizes across plots for reef-level percentages.
+reef_summary <- aggregate(
+  cbind(count, n_points) ~
+    site + year + timepoint + habitat_type + group,
+  data = benthic,
+  FUN = sum
+)
+reef_summary$percent <- 100 * reef_summary$count / reef_summary$n_points
+reef_summary$x_label <- paste(
+  reef_summary$year,
+  reef_summary$timepoint,
+  sep = " / "
+)
+
+# Count each plot once per reef, year, timepoint, and habitat.
+reef_plot_counts <- unique(
+  benthic[c("site", "year", "timepoint", "habitat_type", "plot_id")]
+)
+reef_plot_counts <- aggregate(
+  plot_id ~ site + year + timepoint + habitat_type,
+  data = reef_plot_counts,
+  FUN = length
+)
+names(reef_plot_counts)[names(reef_plot_counts) == "plot_id"] <- "plot_count"
+
+plot_json <- jsonlite::toJSON(
+  plot_summary[c("plot_id", "x_label", "group", "percent")],
+  dataframe = "rows",
+  auto_unbox = FALSE,
+  na = "null"
+)
+
+reef_json <- jsonlite::toJSON(
+  reef_summary[c("site", "habitat_type", "x_label", "group", "percent")],
+  dataframe = "rows",
+  auto_unbox = FALSE,
+  na = "null"
+)
+
+plot_count_json <- jsonlite::toJSON(
+  reef_plot_counts,
+  dataframe = "rows",
+  auto_unbox = FALSE,
+  na = "null"
+)
+
+tagList(
+  tags$h3("3. Benthic Cover"),
+
+  tags$h4("Individual plot"),
+  tags$label(`for` = "benthic-plot-select", "Plot: "),
+  tags$select(id = "benthic-plot-select"),
+  tags$div(id = "benthic-plot-chart", style = "height: 450px;"),
+
+  tags$h4("Reef-level benthic cover"),
+  tags$label(`for` = "benthic-reef-select", "Reef: "),
+  tags$select(id = "benthic-reef-select"),
+  tags$label(`for` = "benthic-habitat-select", " Habitat: "),
+  tags$select(id = "benthic-habitat-select"),
+  tags$div(id = "benthic-reef-chart", style = "height: 450px;"),
+  tags$h5("Number of plots per timepoint"),
+  tags$div(id = "reef-plot-count-table"),
+
+  tags$script(src = "https://cdn.plot.ly/plotly-2.35.2.min.js"),
+
+  tags$script(HTML(paste0(
+    "const plotRows = ", as.character(plot_json), ";\n",
+    "const reefRows = ", as.character(reef_json), ";\n",
+    "const plotCountRows = ", as.character(plot_count_json), ";\n",
+    r"(
+    const plotSelect = document.getElementById('benthic-plot-select');
+    const reefSelect = document.getElementById('benthic-reef-select');
+    const habitatSelect = document.getElementById('benthic-habitat-select');
+
+    function setOptions(select, values) {
+      select.replaceChildren();
+      values.forEach(function(value) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+      });
+    }
+
+    function uniqueSorted(values) {
+      return Array.from(new Set(values)).sort();
+    }
+
+    function renderPlotChart() {
+      const rows = plotRows.filter(function(row) {
+        return row.plot_id === plotSelect.value;
+      });
+
+      const groups = uniqueSorted(rows.map(function(row) {
+        return row.group;
+      }));
+
+      const traces = groups.map(function(group) {
+        const groupRows = rows.filter(function(row) {
+          return row.group === group;
+        });
+
+        return {
+          type: 'bar',
+          name: group,
+          x: groupRows.map(function(row) { return row.x_label; }),
+          y: groupRows.map(function(row) { return row.percent; }),
+          hovertemplate: '%{x}<br>' + group + ': %{y:.1f}%<extra></extra>'
+        };
+      });
+
+      Plotly.react('benthic-plot-chart', traces, {
+        barmode: 'stack',
+        title: 'Benthic cover by map and timepoint',
+        xaxis: { title: 'Year / map / timepoint / habitat', automargin: true },
+        yaxis: { title: 'Cover (%)' },
+        legend: { title: { text: 'Benthic group' } },
+        margin: { t: 55, b: 110, l: 60, r: 20 }
+      }, { responsive: true });
+    }
+
+    function updateHabitatOptions() {
+      const habitats = uniqueSorted(
+        reefRows
+          .filter(function(row) { return row.site === reefSelect.value; })
+          .map(function(row) { return row.habitat_type; })
+      );
+      setOptions(habitatSelect, habitats);
+    }
+
+    function renderPlotCountTable() {
+      const container = document.getElementById('reef-plot-count-table');
+      const rows = plotCountRows.filter(function(row) {
+        return row.site === reefSelect.value &&
+          row.habitat_type === habitatSelect.value;
+      });
+
+      container.replaceChildren();
+
+      if (!rows.length) {
+        container.textContent = 'No plot counts for this selection.';
+        return;
+      }
+
+      const table = document.createElement('table');
+      table.className = 'table';
+
+      const header = table.insertRow();
+      ['Year', 'Timepoint', 'Number of plots'].forEach(function(text) {
+        const cell = document.createElement('th');
+        cell.textContent = text;
+        header.appendChild(cell);
+      });
+
+      rows.forEach(function(row) {
+        const tr = table.insertRow();
+        [row.year, row.timepoint, row.plot_count].forEach(function(value) {
+          tr.insertCell().textContent = value;
+        });
+      });
+
+      container.appendChild(table);
+    }
+
+    function renderReefChart() {
+      const rows = reefRows.filter(function(row) {
+        return row.site === reefSelect.value &&
+          row.habitat_type === habitatSelect.value;
+      });
+
+      const groups = uniqueSorted(rows.map(function(row) {
+        return row.group;
+      }));
+
+      const traces = groups.map(function(group) {
+        const groupRows = rows.filter(function(row) {
+          return row.group === group;
+        });
+
+        return {
+          type: 'bar',
+          name: group,
+          x: groupRows.map(function(row) { return row.x_label; }),
+          y: groupRows.map(function(row) { return row.percent; }),
+          hovertemplate: '%{x}<br>' + group + ': %{y:.1f}%<extra></extra>'
+        };
+      });
+
+      Plotly.react('benthic-reef-chart', traces, {
+        barmode: 'stack',
+        title: 'Reef-level cover: ' + habitatSelect.value,
+        xaxis: { title: 'Year / timepoint', automargin: true },
+        yaxis: { title: 'Cover (%)' },
+        legend: { title: { text: 'Benthic group' } },
+        margin: { t: 55, b: 80, l: 60, r: 20 }
+      }, { responsive: true });
+
+      renderPlotCountTable();
+    }
+
+    setOptions(plotSelect, uniqueSorted(plotRows.map(function(row) {
+      return row.plot_id;
+    })));
+    setOptions(reefSelect, uniqueSorted(reefRows.map(function(row) {
+      return row.site;
+    })));
+
+    plotSelect.addEventListener('change', renderPlotChart);
+    reefSelect.addEventListener('change', function() {
+      updateHabitatOptions();
+      renderReefChart();
+    });
+    habitatSelect.addEventListener('change', renderReefChart);
+
+    if (plotSelect.options.length) renderPlotChart();
+    if (reefSelect.options.length) {
+      updateHabitatOptions();
+      renderReefChart();
+    }
+    )"
+  )))
 )
 ```
