@@ -153,6 +153,9 @@ plot_data <- lapply(seq_len(nrow(plots)), function(i) {
     id = as.character(plot$plot_id),
     name = as.character(plot$plot_id),
     reef_name = as.character(plot$reef_name),
+    site = as.character(
+      reefs$reef_abb[match(as.character(plot$reef_name), reefs$reef_name)]
+    ),
     habitat = if (is.na(plot$habitat)) "" else as.character(plot$habitat),
     lat = plot$lat,
     lon = plot$lon,
@@ -233,6 +236,19 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
           'repeat(2, minmax(0, 1fr))';
         timepoints.style.gap = '16px';
 
+        let scale = 1;
+        let offsetX = 0;
+        let offsetY = 0;
+        const viewers = [];
+
+        function updateViewers() {
+          viewers.forEach(function(viewer) {
+            viewer.image.style.transform =
+              'translate(' + offsetX + 'px, ' + offsetY + 'px) scale(' + scale + ')';
+            viewer.viewport.style.cursor = scale > 1 ? 'grab' : 'default';
+          });
+        }
+
         maps.forEach(function(item) {
           const card = document.createElement('section');
           card.style.border = '1px solid #ccc';
@@ -252,9 +268,6 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
             return;
           }
 
-          let scale = 1;
-          let offsetX = 0;
-          let offsetY = 0;
           let dragging = false;
           let dragStartX = 0;
           let dragStartY = 0;
@@ -299,11 +312,8 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
           resetZoom.type = 'button';
           resetZoom.textContent = 'Reset zoom';
 
-          function updateImageTransform() {
-            image.style.transform =
-              'translate(' + offsetX + 'px, ' + offsetY + 'px) scale(' + scale + ')';
-            viewport.style.cursor = scale > 1 ? 'grab' : 'default';
-          }
+          viewers.push({ image: image, viewport: viewport });
+          updateViewers();
 
           function zoom(factor) {
             scale = Math.max(1, Math.min(5, scale * factor));
@@ -311,7 +321,7 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
               offsetX = 0;
               offsetY = 0;
             }
-            updateImageTransform();
+            updateViewers();
           }
 
           zoomOut.addEventListener('click', function() {
@@ -326,7 +336,7 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
             scale = 1;
             offsetX = 0;
             offsetY = 0;
-            updateImageTransform();
+            updateViewers();
           });
 
           viewport.addEventListener('pointerdown', function(event) {
@@ -342,13 +352,13 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
             if (!dragging) return;
             offsetX = event.clientX - dragStartX;
             offsetY = event.clientY - dragStartY;
-            updateImageTransform();
+            updateViewers();
             viewport.style.cursor = 'grabbing';
           });
 
           function stopDragging() {
             dragging = false;
-            viewport.style.cursor = scale > 1 ? 'grab' : 'default';
+            updateViewers();
           }
 
           viewport.addEventListener('pointerup', stopDragging);
@@ -380,11 +390,24 @@ main_map <- leaflet(width = "100%", height = "70vh") %>%
       function selectPlot(plot) {
         selectedPlot.textContent = plot.name;
         selectedHabitat.textContent = 'Habitat: ' + (plot.habitat || 'N/A');
+
+        window.dispatchEvent(new CustomEvent('lai:plot-selected', {
+          detail: {
+            plotId: plot.id,
+            site: plot.site,
+            habitat: plot.habitat
+          }
+        }));
+
         renderTimepoints(plot);
       }
 
       function showReefPlots(reef) {
         const plots = [].concat(reef.plots || []);
+
+        window.dispatchEvent(new CustomEvent('lai:reef-selected', {
+          detail: { site: reef.id }
+        }));
 
         selectedPlot.textContent = reef.name;
         selectedHabitat.textContent = '';
@@ -793,6 +816,52 @@ tagList(
       renderReefChart();
     });
     habitatSelect.addEventListener('change', renderReefChart);
+
+    function hasOption(select, value) {
+      return Array.from(select.options).some(function(option) {
+        return option.value === value;
+      });
+    }
+
+    window.addEventListener('lai:reef-selected', function(event) {
+      const site = event.detail && event.detail.site;
+
+      if (!hasOption(reefSelect, site)) {
+        console.warn('No benthic data found for reef:', site);
+        return;
+      }
+
+      reefSelect.value = site;
+      updateHabitatOptions();
+      renderReefChart();
+    });
+
+    window.addEventListener('lai:plot-selected', function(event) {
+      const detail = event.detail || {};
+
+      if (hasOption(plotSelect, detail.plotId)) {
+        plotSelect.value = detail.plotId;
+        renderPlotChart();
+      } else {
+        console.warn('No benthic data found for plot:', detail.plotId);
+      }
+
+      if (!hasOption(reefSelect, detail.site)) {
+        console.warn('No benthic data found for reef:', detail.site);
+        return;
+      }
+
+      reefSelect.value = detail.site;
+      updateHabitatOptions();
+
+      if (hasOption(habitatSelect, detail.habitat)) {
+        habitatSelect.value = detail.habitat;
+      } else if (detail.habitat) {
+        console.warn('No matching benthic habitat found:', detail.habitat);
+      }
+
+      renderReefChart();
+    });
 
     if (plotSelect.options.length) renderPlotChart();
     if (reefSelect.options.length) {
