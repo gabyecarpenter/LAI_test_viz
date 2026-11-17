@@ -3,7 +3,24 @@ title: "Data"
 format:
   html:
     page-layout: full
+    
 ---
+    
+<style>
+#quarto-content > main.content {
+  grid-column: 1 / -1;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  padding-inline: 2rem;
+}
+
+#timepoints {
+  width: 100%;
+  max-width: none;
+}
+</style>
+
 
 ```{r}
 #| echo: false
@@ -15,8 +32,6 @@ library(htmlwidgets)
 library(htmltools)
 
 BUCKET_URL <- "https://storage.googleapis.com/ncrmp-atlantic-photos/MIR"
-TIFF_SIZES <- c(6000, 12000, 18000)
-DEFAULT_TIFF_SIZE <- 6000
 PLOT_ZOOM_LEVEL <- 11
 
 mir_habitat_colors <- c(
@@ -29,8 +44,8 @@ mir_habitat_colors <- c(
   "Reef Crest"               = "#FAA53D",
   "Shallow Boulder Coral"    = "#BF0D3E",
   "Shallow Reef Crest"       = "#E83258",
-  "Spur and Groove - Sides"  = "#A4CD39",
-  "Spur and Groove - Top"    = "#48BC46"
+  "Spur and Groove - Sides"   = "#A4CD39",
+  "Spur and Groove - Top"     = "#48BC46"
 )
 
 reefs <- read.csv(
@@ -163,7 +178,7 @@ reef_data <- lapply(seq_len(nrow(reefs)), function(i) {
   )
 })
 
-main_map <- leaflet(width = "100%", height = "550px") %>%
+main_map <- leaflet(width = "100%", height = "70vh") %>%
   addProviderTiles(providers$Esri.WorldImagery) %>%
   addLegend(
     position = "bottomright",
@@ -187,19 +202,7 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
       const selectedPlot = document.getElementById('selected-plot');
       const selectedHabitat = document.getElementById('selected-habitat');
       const timepoints = document.getElementById('timepoints');
-      const status = document.getElementById('photo-status');
-      const canvas = document.getElementById('tiff-canvas');
-      const testerToggle = document.getElementById('size-tester');
       const backButton = document.getElementById('back-to-reefs');
-
-      let activePlot = null;
-
-      function clearDisplay() {
-        canvas.hidden = true;
-        canvas.width = 0;
-        canvas.height = 0;
-        status.textContent = '';
-      }
 
       function updatePlotVisibility() {
         if (map.getZoom() >= data.plotZoomLevel) {
@@ -214,71 +217,7 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
         return data.bucket.replace(/\/$/, '') + '/' + encoded;
       }
 
-      async function loadTiff(item, size) {
-        clearDisplay();
-
-        if (!window.GeoTIFF) {
-          status.textContent =
-            'GeoTIFF.js did not load. Check the script URL and network access.';
-          return;
-        }
-
-        const filename = item.map_id + '_' + size + '.tif';
-        const url = bucketUrl(filename);
-        const startedAt = performance.now();
-        status.textContent = 'Loading ' + filename + '…';
-
-        try {
-          const tiff = await GeoTIFF.fromUrl(url);
-          const image = await tiff.getImage();
-          const sourceWidth = image.getWidth();
-          const sourceHeight = image.getHeight();
-          const scale = Math.min(1, 1600 / sourceWidth);
-          const width = Math.max(1, Math.round(sourceWidth * scale));
-          const height = Math.max(1, Math.round(sourceHeight * scale));
-          const samples = image.getSamplesPerPixel() >= 3 ? [0, 1, 2] : [0];
-
-          const pixels = await image.readRasters({
-            samples: samples,
-            interleave: true,
-            width: width,
-            height: height
-          });
-
-          canvas.width = width;
-          canvas.height = height;
-
-          const context = canvas.getContext('2d');
-          const imageData = context.createImageData(width, height);
-
-          for (let i = 0; i < width * height; i++) {
-            const source = i * samples.length;
-            const target = i * 4;
-
-            imageData.data[target] = pixels[source];
-            imageData.data[target + 1] =
-              samples.length >= 3 ? pixels[source + 1] : pixels[source];
-            imageData.data[target + 2] =
-              samples.length >= 3 ? pixels[source + 2] : pixels[source];
-            imageData.data[target + 3] = 255;
-          }
-
-          context.putImageData(imageData, 0, 0);
-          canvas.hidden = false;
-
-          const elapsed = ((performance.now() - startedAt) / 1000).toFixed(2);
-          status.textContent =
-            filename + ' loaded and displayed in ' + elapsed + ' seconds.';
-        } catch (error) {
-          console.error('TIFF request failed:', url, error);
-          status.textContent =
-            'Could not load TIFF. Check the filename, bucket access, CORS settings, and TIFF format.';
-        }
-      }
-
       function renderTimepoints(plot) {
-        activePlot = plot;
-        clearDisplay();
         timepoints.replaceChildren();
 
         const maps = [].concat(plot.maps || []);
@@ -288,51 +227,153 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
           return;
         }
 
-        maps.forEach(function(item) {
-          const row = document.createElement('div');
-          row.className = 'timepoint-row';
+        timepoints.style.width = '100%';
+        timepoints.style.display = 'grid';
+        timepoints.style.gridTemplateColumns =
+          'repeat(2, minmax(0, 1fr))';
+        timepoints.style.gap = '16px';
 
-          const description = document.createElement('span');
-          description.textContent =
+        maps.forEach(function(item) {
+          const card = document.createElement('section');
+          card.style.border = '1px solid #ccc';
+          card.style.padding = '12px';
+
+          const caption = document.createElement('p');
+          caption.textContent =
             'Date: ' + (item.date || 'N/A') +
             ' — Timepoint: ' + (item.timepoint || 'N/A');
-          row.appendChild(description);
+          card.appendChild(caption);
 
           if (!item.available) {
-            const unavailable = document.createElement('span');
-            unavailable.textContent = ' — N/A (not in bucket)';
-            row.appendChild(unavailable);
-          } else if (testerToggle.checked) {
-            const sizeSelect = document.createElement('select');
-
-            data.sizes.forEach(function(size) {
-              const option = document.createElement('option');
-              option.value = size;
-              option.textContent = size + ' pixels';
-              sizeSelect.appendChild(option);
-            });
-
-            const testButton = document.createElement('button');
-            testButton.type = 'button';
-            testButton.textContent = 'Test TIFF';
-            testButton.addEventListener('click', function() {
-              loadTiff(item, sizeSelect.value);
-            });
-
-            row.appendChild(sizeSelect);
-            row.appendChild(testButton);
-          } else {
-            const loadButton = document.createElement('button');
-            loadButton.type = 'button';
-            loadButton.textContent =
-              'Load TIFF (' + data.defaultSize + ' pixels)';
-            loadButton.addEventListener('click', function() {
-              loadTiff(item, data.defaultSize);
-            });
-            row.appendChild(loadButton);
+            const unavailable = document.createElement('p');
+            unavailable.textContent = 'N/A (not in bucket)';
+            card.appendChild(unavailable);
+            timepoints.appendChild(card);
+            return;
           }
 
-          timepoints.appendChild(row);
+          let scale = 1;
+          let offsetX = 0;
+          let offsetY = 0;
+          let dragging = false;
+          let dragStartX = 0;
+          let dragStartY = 0;
+
+          const controls = document.createElement('div');
+          controls.style.display = 'flex';
+          controls.style.gap = '8px';
+          controls.style.marginBottom = '8px';
+
+          const viewport = document.createElement('div');
+          viewport.style.height = 'min(75vh, 900px)';
+          viewport.style.minHeight = '420px';
+          viewport.style.width = '100%';
+          viewport.style.overflow = 'hidden';
+          viewport.style.background = '#f3f4f6';
+          viewport.style.touchAction = 'none';
+          viewport.style.cursor = 'default';
+
+          const image = document.createElement('img');
+          image.alt = item.map_id + ' map';
+          image.draggable = false;
+          image.style.width = '100%';
+          image.style.height = '100%';
+          image.style.objectFit = 'contain';
+          image.style.transformOrigin = 'center center';
+          image.style.userSelect = 'none';
+
+          const imageStatus = document.createElement('p');
+          imageStatus.textContent = 'Loading ' + item.map_id + '.jpg…';
+
+          const zoomOut = document.createElement('button');
+          zoomOut.type = 'button';
+          zoomOut.textContent = '−';
+          zoomOut.setAttribute('aria-label', 'Zoom out');
+
+          const zoomIn = document.createElement('button');
+          zoomIn.type = 'button';
+          zoomIn.textContent = '+';
+          zoomIn.setAttribute('aria-label', 'Zoom in');
+
+          const resetZoom = document.createElement('button');
+          resetZoom.type = 'button';
+          resetZoom.textContent = 'Reset zoom';
+
+          function updateImageTransform() {
+            image.style.transform =
+              'translate(' + offsetX + 'px, ' + offsetY + 'px) scale(' + scale + ')';
+            viewport.style.cursor = scale > 1 ? 'grab' : 'default';
+          }
+
+          function zoom(factor) {
+            scale = Math.max(1, Math.min(5, scale * factor));
+            if (scale === 1) {
+              offsetX = 0;
+              offsetY = 0;
+            }
+            updateImageTransform();
+          }
+
+          zoomOut.addEventListener('click', function() {
+            zoom(1 / 1.25);
+          });
+
+          zoomIn.addEventListener('click', function() {
+            zoom(1.25);
+          });
+
+          resetZoom.addEventListener('click', function() {
+            scale = 1;
+            offsetX = 0;
+            offsetY = 0;
+            updateImageTransform();
+          });
+
+          viewport.addEventListener('pointerdown', function(event) {
+            if (scale === 1) return;
+            dragging = true;
+            dragStartX = event.clientX - offsetX;
+            dragStartY = event.clientY - offsetY;
+            viewport.setPointerCapture(event.pointerId);
+            viewport.style.cursor = 'grabbing';
+          });
+
+          viewport.addEventListener('pointermove', function(event) {
+            if (!dragging) return;
+            offsetX = event.clientX - dragStartX;
+            offsetY = event.clientY - dragStartY;
+            updateImageTransform();
+            viewport.style.cursor = 'grabbing';
+          });
+
+          function stopDragging() {
+            dragging = false;
+            viewport.style.cursor = scale > 1 ? 'grab' : 'default';
+          }
+
+          viewport.addEventListener('pointerup', stopDragging);
+          viewport.addEventListener('pointercancel', stopDragging);
+
+          image.onload = function() {
+            imageStatus.textContent = item.map_id + '.jpg loaded.';
+          };
+
+          image.onerror = function() {
+            console.error('JPG request failed:', image.src);
+            imageStatus.textContent =
+              'Could not load JPG. Check the filename and bucket access.';
+          };
+
+          image.src = bucketUrl(item.map_id + '.jpg');
+
+          controls.appendChild(zoomOut);
+          controls.appendChild(zoomIn);
+          controls.appendChild(resetZoom);
+          viewport.appendChild(image);
+          card.appendChild(controls);
+          card.appendChild(viewport);
+          card.appendChild(imageStatus);
+          timepoints.appendChild(card);
         });
       }
 
@@ -345,8 +386,6 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
       function showReefPlots(reef) {
         const plots = [].concat(reef.plots || []);
 
-        clearDisplay();
-        activePlot = null;
         selectedPlot.textContent = reef.name;
         selectedHabitat.textContent = '';
         timepoints.textContent =
@@ -385,12 +424,17 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
 
         [].concat(reef.plots || []).forEach(function(plot) {
           const color = data.habitatColors[plot.habitat] || '#9ca3af';
+          const hasAvailableMap = [].concat(plot.maps || []).some(function(item) {
+            return item.available;
+          });
           const icon = L.divIcon({
             className: '',
             html:
               '<div style="width:12px;height:12px;background-color:' +
               color +
-              ';border:1px solid white;box-sizing:border-box"></div>',
+              ';border:' +
+              (hasAvailableMap ? '3px solid black' : '1px solid white') +
+              ';box-sizing:border-box"></div>',
             iconSize: [14, 14],
             iconAnchor: [7, 7]
           });
@@ -416,13 +460,7 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
         );
       }
 
-      testerToggle.addEventListener('change', function() {
-        if (activePlot) renderTimepoints(activePlot);
-      });
-
       backButton.addEventListener('click', function() {
-        clearDisplay();
-        activePlot = null;
         selectedPlot.textContent = '';
         selectedHabitat.textContent = '';
         timepoints.textContent =
@@ -443,44 +481,29 @@ main_map <- leaflet(width = "100%", height = "550px") %>%
     data = list(
       reefs = reef_data,
       bucket = BUCKET_URL,
-      sizes = as.character(TIFF_SIZES),
-      defaultSize = DEFAULT_TIFF_SIZE,
       plotZoomLevel = PLOT_ZOOM_LEVEL,
       habitatColors = as.list(mir_habitat_colors)
     )
   )
 
 tagList(
-  tags$script(
-    src = "https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"
-  ),
   tags$h3("1. Regional Overview Map"),
   tags$p("Click a reef marker or zoom in to see plot markers."),
   main_map,
   tags$hr(),
-  tags$h3("2. Plot TIFFs"),
+  tags$h3("2. Plot JPGs"),
+  tags$p("Maps available: CFN_CA-1 CHCA_CC-1, EDR_R5-3, SOMB_R3-2"),
   tags$button(
     id = "back-to-reefs",
     type = "button",
     hidden = NA,
     "Back to reefs"
   ),
-  tags$p(
-    tags$input(id = "size-tester", type = "checkbox"),
-    tags$label(`for` = "size-tester", " Enable size tester")
-  ),
-  tags$p("When off, the 6,000-pixel TIFF loads. When on, choose a size to test."),
   tags$h4(id = "selected-plot"),
   tags$p(id = "selected-habitat"),
   tags$div(
     id = "timepoints",
     "Click a reef marker or zoom in to see its plots."
-  ),
-  tags$p(id = "photo-status", role = "status"),
-  tags$canvas(
-    id = "tiff-canvas",
-    hidden = NA,
-    style = "max-width: 100%; height: auto;"
   )
 )
 ```
